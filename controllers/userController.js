@@ -3,6 +3,7 @@ import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import Order from "../models/order.js";
 import Product from "../models/product.js";
+import nodemailer from "nodemailer";
 
 export function createUser(req, res) {
     if(req.user==null){
@@ -237,4 +238,111 @@ export async function googleLogin(req, res) {
         console.error("Error during Google login:", error);
         res.status(500).json({ message: "Error during Google login", error: error.message });
     }
+}
+
+async function sendOTPEmail(email, otp) {
+  try {
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST || "smtp.ethereal.email",
+      port: parseInt(process.env.SMTP_PORT) || 587,
+      auth: {
+        user: process.env.SMTP_USER || "",
+        pass: process.env.SMTP_PASS || "",
+      },
+    });
+
+    const info = await transporter.sendMail({
+      from: '"BeautyHub Support" <support@beautyhub.com>',
+      to: email,
+      subject: "Password Reset Verification Code",
+      text: `Your password reset verification code is: ${otp}. It will expire in 10 minutes.`,
+      html: `
+        <div style="font-family: sans-serif; padding: 20px; color: #3b2f33;">
+          <h2 style="color: #6366F1;">Password Reset Request</h2>
+          <p>You requested to reset your password. Use the following 6-digit verification code:</p>
+          <div style="background: #f5f5f7; padding: 15px; font-size: 24px; font-weight: bold; letter-spacing: 4px; text-align: center; border-radius: 8px; margin: 20px 0; color: #3b2f33;">
+            ${otp}
+          </div>
+          <p style="font-size: 12px; color: #888;">This code will expire in 10 minutes. If you did not make this request, please ignore this email.</p>
+        </div>
+      `,
+    });
+
+    console.log("OTP email sent successfully: %s", info.messageId);
+  } catch (error) {
+    console.error("Nodemailer failed to deliver email. Printing OTP directly here:");
+    console.log(`=========================================`);
+    console.log(`[OTP VERIFICATION CODE FOR ${email}]: ${otp}`);
+    console.log(`=========================================`);
+  }
+}
+
+export async function forgotPassword(req, res) {
+  const { email } = req.body || {};
+  if (!email) {
+    return res.status(400).json({ message: "Email is required" });
+  }
+
+  try {
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(404).json({ message: "User with this email not found" });
+    }
+
+    // Generate 6-digit OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    user.otp = otp;
+    user.otpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes from now
+
+    await user.save();
+
+    console.log(`=========================================`);
+    console.log(`[OTP VERIFICATION CODE FOR ${email}]: ${otp}`);
+    console.log(`=========================================`);
+
+    // Send email (runs asynchronously in background)
+    sendOTPEmail(email, otp);
+
+    res.json({ message: "Verification OTP code sent successfully" });
+  } catch (error) {
+    console.error("Error in forgotPassword:", error);
+    res.status(500).json({ message: "Error sending verification code", error: error.message });
+  }
+}
+
+export async function resetPassword(req, res) {
+  const { email, otp, newPassword } = req.body || {};
+  if (!email || !otp || !newPassword) {
+    return res.status(400).json({ message: "Email, OTP code, and new password are required" });
+  }
+
+  try {
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    if (!user.otp || user.otp !== otp) {
+      return res.status(400).json({ message: "Invalid verification code" });
+    }
+
+    if (!user.otpExpiry || new Date() > user.otpExpiry) {
+      return res.status(400).json({ message: "Verification code has expired" });
+    }
+
+    // Update password
+    const passwordHash = bcrypt.hashSync(newPassword, 10);
+    user.password = passwordHash;
+
+    // Clear OTP fields
+    user.otp = undefined;
+    user.otpExpiry = undefined;
+
+    await user.save();
+
+    res.json({ message: "Password reset successfully. Please log in with your new password." });
+  } catch (error) {
+    console.error("Error in resetPassword:", error);
+    res.status(500).json({ message: "Error resetting password", error: error.message });
+  }
 }
