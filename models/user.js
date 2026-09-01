@@ -46,7 +46,37 @@ const userSchema=new mongoose.Schema(
         ,otpExpiry:{
             type:Date
         }
+        ,failedLoginAttempts:{
+            type:Number,
+            default:0
+        }
+        ,lockUntil:{
+            type:Date
+        }
     }
-)
-const User=mongoose.model("users",userSchema)
+);
+
+userSchema.set('toJSON', {
+    transform: function(doc, ret) {
+        delete ret.password;
+        delete ret.otp;
+        delete ret.otpExpiry;
+        delete ret.failedLoginAttempts;
+        delete ret.lockUntil;
+        return ret;
+    }
+});
+
+userSchema.set('toObject', {
+    transform: function(doc, ret) {
+        delete ret.password;
+        delete ret.otp;
+        delete ret.otpExpiry;
+        delete ret.failedLoginAttempts;
+        delete ret.lockUntil;
+        return ret;
+    }
+});
+
+const User=mongoose.model("users",userSchema);
 export default User;

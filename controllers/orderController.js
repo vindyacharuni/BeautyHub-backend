@@ -1,5 +1,6 @@
 import Order from "../models/order.js";
 import Product from "../models/product.js";
+import { isResourceOwnerOrAdmin } from "../middleware/authMiddleware.js";
 
 export async function createOrder(req, res) {
     try {
@@ -107,5 +108,30 @@ export async function getOrders(req,res){
     }catch(error){
         console.error('Error fetching orders:', error);
         return res.status(500).json({ message: 'Error fetching orders', error: error.message });
+    }
+}
+
+export async function getOrderById(req, res) {
+    try {
+        if (!req.user) {
+            return res.status(401).json({ message: "Unauthorized: Please login to view order" });
+        }
+
+        const orderId = String(req.params.orderId || "");
+        const order = await Order.findOne({ orderId: orderId });
+
+        if (!order) {
+            return res.status(404).json({ message: "Order not found" });
+        }
+
+        // Verify Ownership: Only owner or admin allowed
+        if (!isResourceOwnerOrAdmin(req, order.email)) {
+            return res.status(403).json({ message: "Forbidden: You are not authorized to view this order" });
+        }
+
+        return res.json({ order });
+    } catch (error) {
+        console.error("Error fetching order by ID:", error);
+        return res.status(500).json({ message: "Error fetching order", error: error.message });
     }
 }

@@ -1,44 +1,34 @@
 import express from 'express';
 import mongoose from 'mongoose';   
 import bodyParser from 'body-parser'; 
+import cookieParser from 'cookie-parser';
 import userRouter from './Routers/userRouter.js';
 import orderRouter from './Routers/orderRouter.js';
-import jwt from 'jsonwebtoken';
 import productRouter from './Routers/productRouter.js';
 import dotenv from 'dotenv';
 import cors from 'cors';
+import helmet from 'helmet';
+import { sanitizeInput } from './middleware/mongoSanitizeMiddleware.js';
+import { verifyToken } from './middleware/authMiddleware.js';
+import { securityAlertMiddleware } from './middleware/securityAlertMiddleware.js';
+import { logger } from './config/logger.js';
 
 dotenv.config();
 
 const app = express();
-app.use(cors());
 
+app.use(helmet());
+
+app.use(cors({
+    origin: ['http://localhost:5173', 'http://localhost:3000'],
+    credentials: true
+}));
+
+app.use(cookieParser());
 app.use(bodyParser.json());
-
-app.use((req, res, next) => {
-   
-    const value = req.header("Authorization");
-    console.log(value)
-    if(value!=null){
-    const token = value.replace("Bearer ", "");
-    jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
-        console.log(decoded)
-        if (decoded == null) {
-            res.status(403).json({
-                message: "Unauthorized"
-            })
-        } else {
-            req.user = decoded;
-            next();
-        }
-    })
-    }else{
-        next()
-    }
-    
-  
-}
-)
+app.use(securityAlertMiddleware);
+app.use(sanitizeInput);
+app.use(verifyToken);
 
 
 const connectionString=process.env.MONGO_URL;
@@ -53,6 +43,20 @@ mongoose.connect(connectionString).then
 app.use('/api/users',userRouter)
 app.use('/api/products',productRouter)
 app.use('/api/orders',orderRouter)
+
+// Global Express Error Handling Middleware (Logs 5xx errors via Winston)
+app.use((err, req, res, next) => {
+    logger.error(`[EXPRESS 5XX ERROR] ${req.method} ${req.originalUrl}: ${err.message}`, {
+        method: req.method,
+        url: req.originalUrl,
+        ip: req.ip,
+        stack: err.stack
+    });
+    res.status(err.status || 500).json({
+        message: "Internal Server Error",
+        error: process.env.NODE_ENV === "production" ? undefined : err.message
+    });
+});
 
 app.listen(5000, () => {
     console.log("Server is running on port 5000");

@@ -1,5 +1,6 @@
 import Product from "../models/product.js";
 import { isAdmin } from "./userController.js";
+import { invalidateCache } from "../middleware/cacheMiddleware.js";
 
 // Note: Make sure isAdmin is imported or defined somewhere in this file!
 // import { isAdmin } from '../middleware/auth.js'; 
@@ -19,6 +20,8 @@ export async function createProduct(req, res) {
         // ✅ FIX 2: Handle arrays (so your Postman test works)
         if (Array.isArray(productData)) {
             const savedProducts = await Product.insertMany(productData);
+            await invalidateCache("products:*");
+            await invalidateCache("categories:*");
             return res.status(201).json({
                 message: "Products created successfully",
                 products: savedProducts
@@ -29,6 +32,10 @@ export async function createProduct(req, res) {
         const product = new Product(productData);
         const response = await product.save();
         
+        // Invalidate product & categories cache entries
+        await invalidateCache("products:*");
+        await invalidateCache("categories:*");
+
         res.status(201).json({
             message: "Product created successfully",
             product: response
@@ -67,8 +74,13 @@ export async function deleteProduct(req,res){
         });
     }
     try {        
-        const productId=req.params.productId;
-        await Product.findOneAndDelete(productId);
+        const productId = String(req.params.productId);
+        await Product.findOneAndDelete({ productId: productId });
+
+        // Invalidate product & categories cache entries
+        await invalidateCache("products:*");
+        await invalidateCache("categories:*");
+
         res.json({
             message:"Product deleted successfully"
         })
@@ -86,7 +98,7 @@ export async function updateProduct(req,res){
         });
     }
     const data=req.body;
-    const productId=req.params.productId;
+    const productId=String(req.params.productId);
     data.productId=productId;
     try {  
         await Product.updateOne(
@@ -96,6 +108,11 @@ export async function updateProduct(req,res){
             data,
             { upsert: true }
         ); 
+
+        // Invalidate product & categories cache entries
+        await invalidateCache("products:*");
+        await invalidateCache("categories:*");
+
         res.json({
             message:"Product updated successfully"
         })
@@ -111,7 +128,7 @@ export async function updateProduct(req,res){
 }
 export async function getProductInfo(req,res){
     try {
-        const productId=req.params.productId;
+        const productId=String(req.params.productId);
         const product=await Product.findOne({productId:productId});
         if(!product){
             return res.status(404).json({
@@ -134,6 +151,18 @@ export async function getProductInfo(req,res){
         console.error("Error fetching product info:", error);
         res.status(500).json({
             message: "Error fetching product info"
+        });
+    }
+}
+
+export async function getCategories(req, res) {
+    try {
+        const categories = await Product.distinct("category");
+        res.json(categories);
+    } catch (error) {
+        console.error("Error fetching categories:", error);
+        res.status(500).json({
+            message: "Error fetching categories"
         });
     }
 }

@@ -4,6 +4,41 @@ import jwt from 'jsonwebtoken';
 import Order from "../models/order.js";
 import Product from "../models/product.js";
 import nodemailer from "nodemailer";
+import redisClient from "../config/redis.js";
+import { blacklistToken } from "../middleware/authMiddleware.js";
+import { logAuthEvent } from "../utils/authLogger.js";
+import { safeFetch } from "../utils/ssrfGuard.js";
+
+function generateTokens(user, res) {
+    const payload = {
+        email: user.email,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        role: user.role,
+        isBlocked: user.isBlocked,
+        isemailVerified: user.isemailVerified,
+        image: user.profilePicture
+    };
+
+    const accessTokenSecret = process.env.ACCESS_TOKEN_SECRET || process.env.JWT_SECRET || "cbc-6503";
+    const refreshTokenSecret = process.env.REFRESH_TOKEN_SECRET || "beautyhub_refresh_secret_key_2026";
+
+    // 15-minute access token
+    const accessToken = jwt.sign(payload, accessTokenSecret, { expiresIn: '15m' });
+
+    // 7-day refresh token
+    const refreshToken = jwt.sign({ email: user.email }, refreshTokenSecret, { expiresIn: '7d' });
+
+    // Set refresh token in httpOnly cookie
+    res.cookie("refreshToken", refreshToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "strict",
+        maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+    });
+
+    return { accessToken, refreshToken, payload };
+}
 
 export function createUser(req, res) {
     if(req.user==null){
@@ -55,46 +90,72 @@ export function isAdmin(req){
     }
 }
 
-export function loginUser(req,res){
-    const email=req.body.email;
-    const password=req.body.password;
+export async function loginUser(req, res) {
+    const email = String(req.body.email || "");
+    const password = req.body.password;
 
-    User.findOne(
-        {
-            email:email
-        }).then((user)=>{
-            if(user==null){
-                res.status(404).json({
-                    message:"User not found"
-            })}else{
-                const isPasswordCorrect=bcrypt.compareSync(password,user.password);
-                if(isPasswordCorrect){
-                    const token=jwt.sign(
-                    {
-                        email:user.email,
-                        firstName:user.firstName,
-                        lastName:user.lastName,
-                        role:user.role,
-                        isBlocked:user.isBlocked,
-                        isemailVerified:user.isemailVerified,
-                       image:user.profilePicture
-                    },
-                   process.env.JWT_SECRET
-                )
-                    res.json({
-                        token:token,
-                        message:"Login successful"
-                    })
-                }else{
-                    res.status(403).json({
-                        message:"Invalid password"
-                    })
-                }
+    try {
+        const user = await User.findOne({ email: email });
+        if (!user) {
+            return res.status(404).json({ message: "User not found" });
+        }
+
+        // Check if account is blocked or temporarily locked
+        if (user.isBlocked) {
+            return res.status(403).json({ message: "Account is blocked. Please contact support." });
+        }
+
+        if (user.lockUntil && user.lockUntil > new Date()) {
+            const remainingMins = Math.ceil((user.lockUntil - new Date()) / 60000);
+            return res.status(423).json({
+                message: `Account locked due to 5 consecutive failed login attempts. Please try again in ${remainingMins} minute(s).`
+            });
+        }
+
+        const isPasswordCorrect = bcrypt.compareSync(password, user.password);
+        if (isPasswordCorrect) {
+            // Reset failed login attempts and lock window on success
+            if (user.failedLoginAttempts > 0 || user.lockUntil) {
+                user.failedLoginAttempts = 0;
+                user.lockUntil = undefined;
+                await user.save();
             }
-       
 
-        })
+            const { accessToken, payload } = generateTokens(user, res);
+            logAuthEvent({ event: "LOGIN_SUCCESS", email: user.email, ip: req.ip, status: "SUCCESS" });
+            return res.json({
+                token: accessToken,
+                accessToken: accessToken,
+                user: payload,
+                message: "Login successful"
+            });
+        } else {
+            // Increment failed attempts
+            const attempts = (user.failedLoginAttempts || 0) + 1;
+            user.failedLoginAttempts = attempts;
+
+            if (attempts >= 5) {
+                user.lockUntil = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes lockout
+                user.failedLoginAttempts = 0;
+                await user.save();
+                logAuthEvent({ event: "ACCOUNT_LOCKED", email: user.email, ip: req.ip, status: "LOCKED", details: "Maximum 5 failed attempts reached" });
+                return res.status(423).json({
+                    message: "Account locked! Maximum 5 failed login attempts reached. Account locked for 15 minutes."
+                });
+            } else {
+                await user.save();
+                const remaining = 5 - attempts;
+                logAuthEvent({ event: "LOGIN_FAILED", email: user.email, ip: req.ip, status: "FAILURE", details: `${remaining} attempts remaining` });
+                return res.status(403).json({
+                    message: `Invalid password. ${remaining} attempt(s) remaining before account lockout.`
+                });
+            }
+        }
+    } catch (error) {
+        console.error("Error logging in user:", error);
+        return res.status(500).json({ message: "Error logging in user", error: error.message });
     }
+}
 
 export function registerUser(req, res) {
     const { firstName, lastName, email, password, phone } = req.body || {};
@@ -189,16 +250,22 @@ export async function googleLogin(req, res) {
     }
 
     try {
-        const response = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${token}`);
+        const response = await safeFetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${token}`);
         if (!response.ok) {
             return res.status(400).json({ message: "Invalid Google token" });
         }
 
         const payload = await response.json();
-        const { email, given_name, family_name, picture } = payload;
+        const { email, given_name, family_name, picture, email_verified } = payload || {};
 
-        if (!email) {
+        if (!email || typeof email !== 'string') {
             return res.status(400).json({ message: "Email not provided by Google account" });
+        }
+
+        // Data Integrity Check: Ensure Google has verified the user's email address
+        if (email_verified !== true && email_verified !== "true") {
+            logAuthEvent({ event: "GOOGLE_LOGIN", email: String(email), ip: req.ip, status: "FAILURE", details: "Unverified Google email" });
+            return res.status(400).json({ message: "Google account email is not verified" });
         }
 
         let user = await User.findOne({ email });
@@ -217,21 +284,12 @@ export async function googleLogin(req, res) {
             await user.save();
         }
 
-        const backendToken = jwt.sign(
-            {
-                email: user.email,
-                firstName: user.firstName,
-                lastName: user.lastName,
-                role: user.role,
-                isBlocked: user.isBlocked,
-                isemailVerified: user.isemailVerified,
-                image: user.profilePicture
-            },
-            process.env.JWT_SECRET
-        );
+        const { accessToken, payload: userPayload } = generateTokens(user, res);
 
         res.json({
-            token: backendToken,
+            token: accessToken,
+            accessToken: accessToken,
+            user: userPayload,
             message: "Google login successful"
         });
     } catch (error) {
@@ -284,10 +342,10 @@ export async function forgotPassword(req, res) {
   }
 
   try {
-    const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(404).json({ message: "User with this email not found" });
-    }
+        const user = await User.findOne({ email: String(email) });
+        if (!user) {
+          return res.status(404).json({ message: "User with this email not found" });
+        }
 
     // Generate 6-digit OTP
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
@@ -345,4 +403,66 @@ export async function resetPassword(req, res) {
     console.error("Error in resetPassword:", error);
     res.status(500).json({ message: "Error resetting password", error: error.message });
   }
+}
+
+export async function refreshTokenController(req, res) {
+    const refreshToken = req.cookies?.refreshToken;
+    if (!refreshToken) {
+        return res.status(401).json({ message: "Refresh token missing" });
+    }
+
+    try {
+        // Check if refresh token is blacklisted in Redis
+        const isBlacklisted = await redisClient.get(`bl_${refreshToken}`);
+        if (isBlacklisted) {
+            return res.status(401).json({ message: "Refresh token revoked" });
+        }
+
+        const refreshTokenSecret = process.env.REFRESH_TOKEN_SECRET || "beautyhub_refresh_secret_key_2026";
+        const decoded = jwt.verify(refreshToken, refreshTokenSecret);
+
+        const user = await User.findOne({ email: decoded.email });
+        if (!user || user.isBlocked) {
+            logAuthEvent({ event: "TOKEN_REFRESH", email: decoded.email, ip: req.ip, status: "BLOCKED", details: "User account blocked or missing" });
+            return res.status(403).json({ message: "User account disabled or not found" });
+        }
+
+        // REFRESH TOKEN ROTATION: Blacklist current refresh token
+        await blacklistToken(refreshToken, 7 * 24 * 3600);
+
+        // Issue brand-new Access Token AND set brand-new httpOnly Refresh Token cookie
+        const { accessToken, payload } = generateTokens(user, res);
+
+        logAuthEvent({ event: "TOKEN_REFRESH", email: user.email, ip: req.ip, status: "SUCCESS", details: "Token rotated" });
+
+        return res.json({
+            accessToken: accessToken,
+            token: accessToken,
+            user: payload
+        });
+    } catch (err) {
+        logAuthEvent({ event: "TOKEN_REFRESH", email: "UNKNOWN", ip: req.ip, status: "FAILURE", details: err.message });
+        return res.status(401).json({ message: "Invalid or expired refresh token", error: err.message });
+    }
+}
+
+export async function logoutUser(req, res) {
+    const authHeader = req.header("Authorization");
+    const accessToken = authHeader && authHeader.startsWith("Bearer ") ? authHeader.replace("Bearer ", "").trim() : null;
+    const refreshToken = req.cookies?.refreshToken;
+
+    if (accessToken) {
+        await blacklistToken(accessToken, 15 * 60);
+    }
+    if (refreshToken) {
+        await blacklistToken(refreshToken, 7 * 24 * 3600);
+    }
+
+    res.clearCookie("refreshToken", {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "strict"
+    });
+
+    return res.json({ message: "Logout successful" });
 }

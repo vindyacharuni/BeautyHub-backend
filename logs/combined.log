@@ -1,0 +1,1 @@
+{"alertType":"REPEATED_UNAUTHORIZED_401","count":5,"details":"Suspicious activity: 5 401 Unauthorized responses from IP ::1 in 5 minutes","ip":"::1","level":"warn","message":"[SECURITY ALERT] REPEATED_UNAUTHORIZED_401","service":"beautyhub-backend","threshold":5,"timestamp":"2026-09-01 00:27:36","type":"SECURITY_ALERT"}
