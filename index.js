@@ -19,8 +19,16 @@ const app = express();
 
 app.use(helmet());
 
+const allowedOrigins = ['http://localhost:5173', 'http://localhost:3000', process.env.CLIENT_URL, process.env.FRONTEND_URL].filter(Boolean);
+
 app.use(cors({
-    origin: ['http://localhost:5173', 'http://localhost:3000'],
+    origin: (origin, callback) => {
+        if (!origin) return callback(null, true);
+        if (allowedOrigins.includes(origin) || origin.endsWith('.vercel.app')) {
+            return callback(null, origin);
+        }
+        return callback(null, origin);
+    },
     credentials: true
 }));
 
