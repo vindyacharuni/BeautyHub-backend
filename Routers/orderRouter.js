@@ -1,5 +1,5 @@
 import express from "express";
-import { createOrder, getOrders, getOrderById } from "../Controllers/orderController.js";
+import { createOrder, getOrders, getOrderById } from "../controllers/orderController.js";
 import { requireAuth } from "../middleware/authMiddleware.js";
 import { validate } from "../middleware/validate.js";
 import { createOrderSchema } from "../middleware/validationSchemas.js";
