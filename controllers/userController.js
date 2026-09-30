@@ -4,7 +4,7 @@ import jwt from 'jsonwebtoken';
 import Order from "../models/order.js";
 import Product from "../models/product.js";
 import nodemailer from "nodemailer";
-import redisClient from "../config/redis.js";
+import redisClient, { safeRedisGet, safeRedisSet } from "../config/redis.js";
 import { blacklistToken } from "../middleware/authMiddleware.js";
 import { logAuthEvent } from "../utils/authLogger.js";
 import { safeFetch } from "../utils/ssrfGuard.js";
@@ -413,7 +413,7 @@ export async function refreshTokenController(req, res) {
 
     try {
         // Check if refresh token is blacklisted in Redis
-        const isBlacklisted = await redisClient.get(`bl_${refreshToken}`);
+        const isBlacklisted = await safeRedisGet(`bl_${refreshToken}`);
         if (isBlacklisted) {
             return res.status(401).json({ message: "Refresh token revoked" });
         }

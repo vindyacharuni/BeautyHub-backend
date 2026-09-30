@@ -1,5 +1,5 @@
 import jwt from "jsonwebtoken";
-import redisClient from "../config/redis.js";
+import redisClient, { safeRedisGet, safeRedisSet } from "../config/redis.js";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -22,7 +22,7 @@ export async function verifyToken(req, res, next) {
 
     try {
         // Check if token is blacklisted in Redis
-        const isBlacklisted = await redisClient.get(`bl_${token}`);
+        const isBlacklisted = await safeRedisGet(`bl_${token}`);
         if (isBlacklisted) {
             req.user = null;
             return res.status(401).json({ message: "Token has been revoked/logged out" });
@@ -81,7 +81,7 @@ export async function blacklistToken(token, ttlSeconds = 900) {
     try {
         // Guarantee positive TTL
         const safeTtl = Math.max(ttlSeconds, 60);
-        await redisClient.set(`bl_${token}`, "blacklisted", "EX", safeTtl);
+        await safeRedisSet(`bl_${token}`, "blacklisted", "EX", safeTtl);
     } catch (error) {
         console.error("Error blacklisting token in Redis:", error.message);
     }

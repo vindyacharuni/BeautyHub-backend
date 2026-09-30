@@ -17,10 +17,12 @@ export function cacheMiddleware(keyPrefixOrFn, ttlSeconds = 300) {
         }
 
         try {
-            const cachedData = await redisClient.get(key);
-            if (cachedData) {
-                console.log(`[CACHE HIT] ${req.method} ${req.originalUrl} (Key: ${key})`);
-                return res.json(JSON.parse(cachedData));
+            if (redisClient && redisClient.status === "ready") {
+                const cachedData = await redisClient.get(key);
+                if (cachedData) {
+                    console.log(`[CACHE HIT] ${req.method} ${req.originalUrl} (Key: ${key})`);
+                    return res.json(JSON.parse(cachedData));
+                }
             }
         } catch (error) {
             console.error(`[CACHE ERROR] Redis GET failed for key "${key}":`, error.message);
@@ -31,7 +33,7 @@ export function cacheMiddleware(keyPrefixOrFn, ttlSeconds = 300) {
 
         const originalJson = res.json.bind(res);
         res.json = (body) => {
-            if (res.statusCode >= 200 && res.statusCode < 300) {
+            if (res.statusCode >= 200 && res.statusCode < 300 && redisClient && redisClient.status === "ready") {
                 redisClient.set(key, JSON.stringify(body), "EX", ttlSeconds).catch((err) => {
                     console.error(`[CACHE ERROR] Redis SET failed for key "${key}":`, err.message);
                 });
@@ -49,6 +51,7 @@ export function cacheMiddleware(keyPrefixOrFn, ttlSeconds = 300) {
  */
 export async function invalidateCache(pattern) {
     try {
+        if (!redisClient || redisClient.status !== "ready") return;
         const keys = await redisClient.keys(pattern);
         if (keys.length > 0) {
             await redisClient.del(keys);
